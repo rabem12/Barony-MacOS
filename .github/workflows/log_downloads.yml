@@ -1,0 +1,65 @@
+name: Log Release Downloads 24/7
+
+on:
+  schedule:
+    # Runs every day at 00:00 UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  log-downloads:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        # Use fetch-depth 0 so we can rebase safely if there are concurrent commits
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch and Record Download Counts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p stats
+          CSV_FILE="stats/downloads.csv"
+
+          if [ ! -f "$CSV_FILE" ]; then
+            echo "Date,Total Downloads,Latest Release Downloads,Version" > "$CSV_FILE"
+          fi
+
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          
+          # Fetch release data from GitHub API
+          RESPONSE=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/releases?per_page=100")
+
+          # Sum metrics using jq
+          TOTAL=$(echo "$RESPONSE" | jq '[.[].assets[].download_count] | add // 0')
+          LATEST_TAG=$(echo "$RESPONSE" | jq -r '.[0].tag_name // "none"')
+          LATEST_DOWNLOADS=$(echo "$RESPONSE" | jq '[.[0].assets[].download_count] | add // 0')
+
+          # Append to CSV
+          echo "$TIMESTAMP,$TOTAL,$LATEST_DOWNLOADS,$LATEST_TAG" >> "$CSV_FILE"
+
+      - name: Commit and Push (With Conflict Handling)
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
+          git add stats/downloads.csv
+          
+          # Check if there are changes to commit
+          if ! git diff --staged --quiet; then
+            git commit -m "chore(stats): update download metrics [skip ci]"
+            
+            # Fetch and rebase to prevent Git push conflicts if someone else committed recently
+            git pull --rebase origin ${{ github.event.repository.default_branch }}
+            
+            git push origin HEAD:${{ github.event.repository.default_branch }}
+          else
+            echo "No changes in download counts. Skipping commit."
+          fi
